@@ -1,0 +1,481 @@
+// AUTOMATICALLY GENERATED: imported vars from saved link.
+var CONVERT_TO_IMPORT = (
+[{"type":"geometry","name":"pt","record":{"geometries":[{"type":"Point","coordinates":[-79.50603027343749,35.753943736600775]}],"displayProperties":[],"properties":{},"color":"#d63000","mode":"Geometry","shown":true,"locked":false}},{"type":"table","name":"basins","record":{"id":"users/dschaffersmith/TNC_SRP/Major_River_Basins"}},{"type":"image","name":"elev","record":{"id":"USGS/NED"}},{"type":"imageCollection","name":"nlcd","record":{"id":"USGS/NLCD"}},{"type":"imageVisParam","name":"radarVisParams","record":{"params":{"opacity":1,"bands":["VH_max"],"min":-30,"max":0,"gamma":1}}},{"type":"imageVisParam","name":"lcVisParams","record":{"params":{"opacity":1,"bands":["landcover"],"max":6,"palette":["ffffff","1505ff","1fb8a9","2e8b28","b1fb6e","efd098","ff0326"]}}},{"type":"image","name":"FloodplainDef1000","record":{"id":"users/dschaffersmith/FATHOM_NC_Floodplains/def1in1000"}},{"type":"image","name":"FloodplainPluv1000","record":{"id":"users/dschaffersmith/FATHOM_NC_Floodplains/pluv1in1000"}},{"type":"imageVisParam","name":"imageVisParam","record":{"params":{"opacity":1,"bands":["VH_max"],"min":-30,"max":0,"gamma":1}}},{"type":"image","name":"geomorphons","record":{"id":"users/dschaffersmith/GeomorphNC_USGS/Geomorphons_of_NC_30ft"}},{"type":"image","name":"LandsatMNDWImax","record":{"id":"users/dschaffersmith/Florence_landsat_mosaics/Florence_after_MNDWI_max"}},{"type":"image","name":"LandsatNDWImax","record":{"id":"users/dschaffersmith/Florence_landsat_mosaics/Florence_after_NDWI_max"}},{"type":"image","name":"surfWater","record":{"id":"JRC/GSW1_0/GlobalSurfaceWater"}},{"type":"imageVisParam","name":"imageVisParam2","record":{"params":{"opacity":1,"bands":["classification"],"min":1,"max":4,"palette":["ffffff","b4fcb3","1d82ff","081077"]}}},{"type":"imageCollection","name":"hand100","record":{"id":"users/gena/global-hand/hand-100"}},{"type":"table","name":"huc12","record":{"id":"USGS/WBD/2017/HUC12"}},{"type":"table","name":"truthPolys","record":{"id":"users/dschaffersmith/Florence_validation_data/Florence_validation_NOAA_USGS_NCDEMS_poly"}},{"type":"table","name":"states","record":{"id":"TIGER/2016/States"}}])
+
+// AUTOMATICALLY GENERATED: location from saved link.
+Map.setCenter(264.8, 34.8, 4)
+
+// April 8, 2020
+
+// Danica Schaffer-Smith
+// d.schaffer-smith@tnc.org
+
+// This script maps flooding in North Carolina due to Hurricane Florence using pre- and post-storm 
+// synthetic aperture radar from Sentinal 1. This work was completed under a NatureNet Science 
+// Fellowship project with Arizona State University's Center for Biodiversity Outcomes and The Nature 
+// Conservancy examining risks and opportunities to better manage water. 
+
+// For more information about the approach used here, please see:
+// Schaffer-Smith, D., Myint, S.W., Muenich, R.L., Tong, D., and DeMeester, J. 2020. Repeated hurricanes reveal 
+// risks and opportunities for social-ecological resilience to flooding and water quality problems. Environmental
+// Science & Technology. 
+
+// Additional examples of flood mapping methods using Sentinel-1 radar are available, including:
+
+// Boryan, C.G., Yang, Z., Sandborn, A., Willis, P., and Hack, B. 2018 Operational Agricultural Flood Monitoring 
+// With Sentinel-1 Synthetic Aperature Radar.International Geoscience and Remote Sensing Symposium.
+
+// Ilyushchenko, S.  2016. Mapping flooded areas using Sentinel-1 in Google Earth Engine. 
+// http://www.cesbio.ups-tlse.fr/multitemp/?p=7717
+
+// Applied  Flow Technology provided modeled 1,000-year floodplain data to The Nature Conservancy. All other inputs 
+// are derived from publicly available datasets.  
+
+
+//---------------------------------------------------------------------------------------------------------------
+// SET-UP
+//---------------------------------------------------------------------------------------------------------------
+
+// Set geographies of interest
+
+// NC state boundary
+var nc = states.filter(ee.Filter.eq('NAME', 'North Carolina'));
+
+// River basins that drain to the Atlantic Ocean
+// Major river basins are already loaded as an import--we will create a subset using a list
+var basinList = ['Cape Fear', 'Chowan', 'Neuse', 'Lumber', 'Pasquotank', 'Roanoke', 'Tar Pamlico', 'White Oak', 'Yadkin Pee Dee'];
+var coastalBasins = basins.filter(ee.Filter.inList('Name', basinList));
+
+// Assign geographies for clipping
+var geo = coastalBasins;
+var geo2 = nc;
+
+// Ancillary datasets:
+
+// Load the National Land Cover Dataset
+var nlcd = ee.Image('USGS/NLCD/NLCD2011');
+
+// Reclassify landcover into more simplified cover types
+var lc = nlcd.select('landcover');
+//print('landcover: ', lc);
+var lc_re = lc
+    .where(lc.eq(11), 1)  // open water
+    .where(lc.eq(12), 4) // perennial ice/snow --> open space
+    .where(lc.gte(21), 6) // 21-24 = urban
+    .where(lc.gte(31), 5) // Barren land --> open space, non-ag
+    .where(lc.gte(41), 3) // 41- 43 = forest types --> forest
+    .where(lc.gte(51), 4) // 51-74 = shrubs/grasslands/herbaceous --> Open space
+    .where(lc.gte(81), 4) // 81-82 = pasture and agriculture --> Open space (should be mapped well by USDA)
+    .where(lc.eq(90), 2) // 90 = woody wetlands
+    .where(lc.eq(95), 1); // 95 herbaceous wetlands, lump with water
+    
+// Second stage reclassification
+var lc_re2 = lc_re
+  .where(lc_re.eq(0), 1)  // ice --> open space
+  .where(lc_re.eq(1), 1) // open water expected flooded -- > open
+  .where(lc_re.lte(3), 2) // forested/woody wetlands --> closed canopy
+  .where(lc_re.gt(3), 1); // open space that is not expected to have canopy cover.
+
+// Percent tree cover
+var treecov = nlcd.select('percent_tree_cover'); // % tree cover
+
+// Percent impervious
+var impervious = nlcd.select('impervious'); // % impervious
+
+// Water recurrence from the Global Surface Water Product
+var waterRecurrence = surfWater.select('recurrence');
+
+// Identify 'permanent' water with annual recurrence of >= 50% 
+var waterPerm = waterRecurrence.where(waterRecurrence.lt(50), 0).where(waterRecurrence.gte(50), 1); 
+
+// Terrain datasets
+var terrain = ee.Algorithms.Terrain(elev);
+var slope = terrain.select('slope');
+
+// Geomorphological features of North Carolina is already loaded as an import. 
+
+// Height above nearest drainage (HAND) with a 100 cell threshold
+// Assets pre-prepared by Gennadi Donchyts
+hand100 = hand100.mosaic();
+
+// FATHOM '1000-yr' pluvial and defended floodplains are  already loaded as an import
+// Combine pluvial and defended floodplains into one dataset
+var FloodplainCombined1000 = FloodplainPluv1000.add(FloodplainDef1000);
+
+// Add these layers into the map viewer
+//Map.addLayer(lc_re, lcVisParams, 'Landcover simplified');
+//Map.addLayer(treecov, {min:0,max:100}, '% Tree Cover');
+//Map.addLayer(impervious, {min:0,max:100}, '% Impervious');
+//Map.addLayer(hand100.mask(hand100.unitScale(0, 15).subtract(1).multiply(-1)), {min: 0, max: 20, palette: ['74a9cf', '2b8cbe', '045a8d'].reverse()}, 'HAND 100 < 20m', false);
+//Map.addLayer(waterRecurrence, {min: 0, max: 100}, 'Annual Recurrence');
+//Map.addLayer(FloodplainPluv1000);
+//Map.addLayer(FloodplainDef1000);
+//Map.addLayer(geomorphons.randomVisualizer(), {}, 'Geomorphons of NC');
+
+
+// --------------------------------------------------------------------
+// TRAINING / VALIDATION INFORMATION
+// --------------------------------------------------------------------
+
+// Load validation regions, which include high-confidence flooded and non-flooded regions that were 
+// visible in post-storm NOAA high resolution aerial photography and high-water mark data collected 
+// by the U.S. Geological Survey and the NC Division of Emergency Management.
+print('Class types:', truthPolys.aggregate_histogram('Flood'));
+
+var truthImage = truthPolys.reduceToImage({
+  properties: ['Flood'],
+  reducer: ee.Reducer.first()
+}).rename('Flood');
+Map.centerObject(geo, 13);
+Map.addLayer(truthImage, {min:0, max:1, palette: ['000000', '0000FF']}, 'Training regions');
+
+var truthMask = truthImage
+  .where(truthImage.eq(0), 1); // Create a mask to clip the forest cover data
+
+// Create four classes by reclassifying the truth image classes using % forest cover from the NLCD
+var canopy = treecov
+  .where(treecov.lt(50), 10)
+  .where(treecov.gte(50), 100)
+  .updateMask(truthMask); // tree cover >=50% are considered "canopy" pixels
+var truthZones = truthImage.add(canopy);
+
+var truthZones = truthZones
+  .where(truthZones.eq(10), 1) // Open non-flood status = 1
+  .where(truthZones.eq(100), 2) // Forest non-flood status = 2
+  .where(truthZones.eq(11), 3) // Open flooded status = 3
+  .where(truthZones.eq(101), 4) // Forest flooded status = 4
+  .rename('status');
+Map.addLayer(truthZones, {min:1, max:4, palette: ['white', 'green', 'blue', 'navy']}, 'Training zones');  
+
+// Stratified random sample to select a balanced set of pixels across these 4 target classes.
+var valData = truthZones.stratifiedSample({
+  seed: 1259, //This is the number of flooded regions assembled from NOAA, NCDEMS, USGS
+  numPoints: 1500, // 1500 points from each of the 4 classes sampled
+  //numPoints: 1250, // 5000 points is the maximum!
+  classBand: 'status', 
+  region: geo,
+  scale: 20,
+  geometries: true,
+  dropNulls:true,
+  tileScale: 1
+});
+
+print('Stratified sample truth points: ', valData.limit(10));
+print ('Strat sample truth points by class', valData.reduceColumns(ee.Reducer.frequencyHistogram(),["status"]));
+
+
+// ------------------------------------------------------------------------------
+// SATELLITE IMAGE DATA
+// ------------------------------------------------------------------------------
+
+// Load Sentinel-1 C-band SAR Ground Range collection 
+// Note that these data have already been rescaled using the Sentinel Toolbox.
+var collection = ee.ImageCollection('COPERNICUS/S1_GRD').filterBounds(coastalBasins)
+.filter(ee.Filter.eq('instrumentMode', 'IW'));
+
+//Function to create boxcar 5 x 5 pixel filter for the images in each collection
+// The Sentinel GRD native resolution is 10 m
+var boxcar = ee.Kernel.circle({
+  radius: 5, units: 'pixels', normalize: true
+});
+// Function to apply boxcar filter
+var fltr = function(image) {
+  return image.convolve(boxcar);
+};
+
+// Cross polarization
+var vhAscBefore = collection
+.select('VH')
+.filterDate('2018-09-01', '2018-09-13') // pre-Florence dry reference images
+.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'))
+.reduce(ee.Reducer.minMax());
+print(vhAscBefore);
+print('Sentinel pre-storm images: ', collection.select('VH').filterDate('2018-09-01', '2018-09-13').filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING')));
+var vhAscBeforeF = vhAscBefore.convolve(boxcar);
+
+var vhAscAfter = collection
+.select('VH')
+.filterDate('2018-09-18', '2018-09-28') // post-Florence flooded images
+.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'))
+.reduce(ee.Reducer.minMax());
+print(vhAscAfter);
+print('Sentinel post-storm images: ', collection
+.select('VH')
+.filterDate('2018-09-18', '2018-09-28')
+.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING')));
+var vhAscAfterF = vhAscAfter.convolve(boxcar); // apply 5 x 5 filter to all images
+
+Map.addLayer(vhAscAfter.select('VH_max').subtract(vhAscBefore.select('VH_min')), {min:-10,max:10}, 'After - before VH maximum difference', 0);
+
+// Vertical polarization
+var vvAscBefore = collection
+.select('VV')
+.filterDate('2018-09-02', '2018-09-13') 
+.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'))
+.reduce(ee.Reducer.minMax());
+var vvAscBeforeF = vvAscBefore.convolve(boxcar); // apply 5 x 5 filter to all images
+
+var vvAscAfter = collection
+.select('VV')
+.filterDate('2018-09-18', '2018-09-30') // This gets us more of the coast!
+.filter(ee.Filter.eq('orbitProperties_pass', 'ASCENDING'))
+.reduce(ee.Reducer.minMax());
+var vvAscAfterF = vvAscAfter.convolve(boxcar); // apply 5 x 5 filter to all images
+
+Map.addLayer(vvAscAfter.select('VV_max').subtract(vvAscBefore.select('VV_min')), {min:-10,max:10}, 'After - before VV maximum difference', 0);
+
+
+// Create minimum, maximum mosaics for each polarization pre- and post-storm
+var vvBeforeMin = vvAscBeforeF.select('VV_min').mask(slope.lt(5));
+var vvAfterMax = vvAscAfterF.select('VV_max').mask(slope.lt(5)); // expect VV to increase where new still open water flooding or flooded vegetation are present
+var vhBeforeMin = vhAscBeforeF.select('VH_min').mask(slope.lt(5));
+var vhAfterMax = vhAscAfterF.select('VH_max').mask(slope.lt(5));
+
+// Threshold smoothed radar intensities to identify "flooded" areas.
+var SMOOTHING_RADIUS = 100;
+var DIFF_UPPER_THRESHOLD = -1; 
+var DIFF_LOWER_THRESHOLD = 3; // Brighter areas would indicate flooded forest or urban
+
+var vvDiffSmoothed = vvAfterMax.focal_median(SMOOTHING_RADIUS, 'circle', 'meters')
+.subtract(vvBeforeMin.focal_median(SMOOTHING_RADIUS, 'circle', 'meters'));
+
+var vvDiffTh = vvDiffSmoothed.lt(DIFF_UPPER_THRESHOLD);
+var vvDiffThF = vvDiffSmoothed.gt(DIFF_LOWER_THRESHOLD).updateMask(treecov.gt(10));
+var vvDiffThU = vvDiffSmoothed.gt(DIFF_LOWER_THRESHOLD).updateMask(impervious.gt(10));
+
+var vhDiffSmoothed = vhAfterMax.focal_median(SMOOTHING_RADIUS, 'circle', 'meters')
+.subtract(vhBeforeMin.focal_median(SMOOTHING_RADIUS, 'circle', 'meters'));
+
+var vhDiffTh = vhDiffSmoothed.lt(DIFF_UPPER_THRESHOLD);
+var vhDiffThF = vhDiffSmoothed.gt(DIFF_LOWER_THRESHOLD).updateMask(treecov.gt(10));
+var vhDiffThU = vhDiffSmoothed.gt(DIFF_LOWER_THRESHOLD).updateMask(impervious.gt(10));
+
+// Create ratios of pre- and post-storm HV/VV
+var vhTOvvBeforeMin = vhBeforeMin.divide(vvBeforeMin);
+var vhTOvvAfterMax = vhAfterMax.divide(vvAfterMax);
+
+// Display map
+Map.centerObject(pt, 13);
+//Map.addLayer(vvBeforeMin, {min:-30,max:0}, 'Before flood VV');
+//Map.addLayer(vvAfterMax, {min:-30,max:0}, 'After flood VV');
+//Map.addLayer(vvAfterMax.subtract(vvBeforeMin), {min:-10,max:10}, 'After - before VV', 0);
+//Map.addLayer(vvDiffSmoothed, {min:-10,max:10}, 'diff smoothed VV', 0);
+//Map.addLayer(vvDiffTh.updateMask(vvDiffTh),
+//{palette:"0000FF"},'flooded areas - blue VV',1);
+//Map.addLayer(vhBeforeMin, {min:-30,max:0}, 'Before flood VH');
+//Map.addLayer(vhAfterMax, {min:-30,max:0}, 'After flood VH');
+//Map.addLayer(vhAfterMax.subtract(vhBeforeMin), {min:-10,max:10}, 'After - before VH', 0);
+//Map.addLayer(vhDiffSmoothed, {min:-10,max:10}, 'diff smoothed VH', 0);
+//Map.addLayer(vhDiffTh.updateMask(vhDiffTh),
+//{palette:"0000F0"},'flooded areas - blue VH',1);
+//Map.addLayer(vhTOvvBeforeMin, {}, 'Ratio Before Min VH / VV');
+//Map.addLayer(vhTOvvAfterMax), {}, 'Ratio After Max VH / VV';
+//Map.addLayer(waterPerm, {}, 'Permanent Water (>= 50% recurrence)');
+
+
+// -----------------------------------------------------------
+// CLASSIFICATION
+// -----------------------------------------------------------
+
+// Create a stack of covariate datasets
+var stack3 = vvAscBefore.select('VV_min')
+.addBands(vvAscAfter.select('VV_max'))
+.addBands(vhAscBefore.select('VH_min'))
+.addBands(vhAscAfter.select('VH_max'))
+.addBands(vhAscBefore.select('VH_min').divide(vvAscBefore.select('VV_min')))
+.addBands(vhAscAfter.select('VH_max').divide(vvAscAfter.select('VV_max')))
+.addBands(elev)
+.addBands(geomorphons)
+.addBands(hand100) // Gennadi's HAND 100
+.addBands(treecov) // % tree cover
+.addBands(impervious) // % impervious
+.addBands(FloodplainPluv1000) // FATHOM pluvial 1000 yr floodplain
+.addBands(FloodplainDef1000); // FATHOM 1000 yr defended floodplain
+
+// Overwrite band names to be more intuitive
+var bandNamesStack3 = stack3.bandNames();
+var newBandNamesStack3 = ["vvMinBefore", "vvMaxAfter", "vhMinBefore", "vhMaxAfter", "vhVvRatioBefore", "vhVvRatioAfter", "elev", "geomorphons", "HAND", "percTree", "percImpervious", "floodPluvial", "floodDefended"];
+var stack3 = stack3.select(bandNamesStack3, newBandNamesStack3); // Overwrite band names
+print('stack file 3: ', stack3);
+
+// Extract the covariates at each training pixel 
+var training3 = stack3.sampleRegions({
+  collection: valData,
+  properties: ['status'],
+  scale: 20,
+  geometries: true
+});
+
+print("Number of training points: ", training3.size());
+print('Points by class:', training3.reduceColumns(ee.Reducer.frequencyHistogram(), ["status"]));
+
+// Add a column of random uniforms to the training dataset.
+//var withRandom = training3.randomColumn('random', 5731); // 5731 is the seed for randomizing -- # training points
+var withRandom = training3.randomColumn('random', 4778); // 5731 is the seed for randomizing -- # training points
+
+// Split data to use 70% for model testing, and 30% for model validation
+var split = 0.7;  // Roughly 70% training, 30% testing.
+var trainingPartition = withRandom.filter(ee.Filter.lt('random', split));
+var testingPartition = withRandom.filter(ee.Filter.gte('random', split));
+
+// Write out the validation dataset for tuning in R
+Export.table.toDrive({
+  collection: withRandom, 
+  description: "validation_set_Florence",
+  fileFormat: "SHP",
+  folder: "from_GEE"
+});
+
+// Analysis in R identified optimal parameters as follows:
+// variablesPerSplit = 8 // This is "mtry" in R
+// minLeafPopulation = 14 // This is the same as the node size in R
+// numberOfTrees = optimal 993
+// PARAMS 6/25 BELOW
+// variablesPerSplit = 6 // This is "mtry" in R
+// minLeafPopulation = 13 // This is the same as the node size in R
+// numberOfTrees = optimal 744
+
+// Train the model with the 70% split of the data
+var rf1 = ee.Classifier.randomForest({
+  seed : 22,
+  numberOfTrees: 744, 
+  variablesPerSplit: 6,
+  minLeafPopulation: 13,
+  outOfBagMode : true
+  }).train(trainingPartition, "status", stack3.bandNames()); // Trees ~ 2x input covariates
+
+
+// Run the classification using the values for our training set from the covariate stack
+var result_rf1 = stack3.classify(rf1);
+
+
+// Apply a majority filter
+// count patch sizes with a 2 pixel window, using an 8-neighbor rule
+var patchsize = result_rf1.connectedPixelCount(25, true);
+// run a majority filter
+var filtered = result_rf1.focal_mode({
+    radius: 2,
+    kernelType: 'circle',
+    units: 'pixels',
+}); 
+
+// Filtered classification clipped to our geography of interest
+var result_rf1_filtered =  result_rf1.where(patchsize.lt(2),filtered).clip(geo);
+
+
+// --------------------------------------------------------------------------------
+// ACCURACY ASSESSMENT
+// --------------------------------------------------------------------------------
+// Print the confusion matrix for the classification BEFORE inferred flooding.
+var validation_rf1 = result_rf1_filtered.sampleRegions({
+  collection: testingPartition,
+  properties: ['status'],
+  scale: 20,
+  tileScale: 1,
+  geometries: true
+});
+
+
+// Export accuracy
+Export.table.toDrive({
+  collection: ee.FeatureCollection([ee.Feature(null, {
+    accuracy: validation_rf1.errorMatrix("status", "classification").accuracy()
+  })]),
+  description: "accuracy_Florence",
+  folder: "from_GEE"
+});
+
+// Export confusion matrix 
+Export.table.toDrive({
+  collection: ee.FeatureCollection(ee.Feature(null, {'matrix': validation_rf1.errorMatrix("status", "classification").array()})),
+  description: 'confusion_matrix_Florence',
+  folder: "from_GEE"
+});
+
+
+// ---------------------------------------------------------------------
+// POST-PROCESSING
+// ---------------------------------------------------------------------
+// Reclassify random forest result to a binary map of water and non-water
+var result_rf1_binary = result_rf1_filtered
+  .where(result_rf1_filtered.eq(1), 0)
+  .where(result_rf1_filtered.eq(2), 0)
+  .where(result_rf1_filtered.eq(3), 1)
+  .where(result_rf1_filtered.eq(4), 1);
+
+Map.addLayer(result_rf1_binary, {min: 0, max: 1}, 'Classified Flooding Image Filtered');
+
+// Add in flooding detected from simple vv vh difference thresholds
+var combinedResult = result_rf1_binary.add(vvDiffTh.unmask(0)).add(vhDiffTh.unmask(0));
+var combinedResult2 = combinedResult.where(combinedResult.gt(0), 1).toInt().clip(geo);
+Map.addLayer(combinedResult2, {min: 0, max: 1}, 'Classified Flooding Image');
+
+// Add in permanent water 
+var result_rf1_floodPermWater = combinedResult2.add(waterPerm.unmask(0)).toInt();//.clip(geo);
+var final_map = result_rf1_floodPermWater.where(result_rf1_floodPermWater.gt(0), 1); // Final just binary
+
+// Tabulate the area by class
+// Compute area of each lc type within the polygon
+var classArea = result_rf1_floodPermWater.addBands(ee.Image.pixelArea()).reduceRegion({
+  reducer: ee.Reducer.sum().unweighted().group(0), // by default, sum uses weighting
+  geometry: geo2.geometry(),
+  scale: 20,
+  tileScale: 1,
+  maxPixels: 1e13
+});
+print(classArea); // The sum field will have area in meters sq
+
+
+// ---------------------------------------------------------------------
+// EXPORTING
+// ---------------------------------------------------------------------
+
+// Export the extent of permanent water areas from JRC
+Export.image.toDrive({
+  image: waterPerm,
+  description: 'Coastal_Basins_permwater_JRC',
+  crs: 'EPSG:3358', // NAD 83 HARN projection
+  scale: 30,
+  region: geo.geometry(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e12,
+  folder: "from_GEE"
+});
+
+// Export the final binary classification including the thresholded flood areas
+Export.image.toDrive({
+  image: combinedResult2,
+  description: 'Florence_flooding_random_forest_binary',
+  crs: 'EPSG:3358', // NAD 83 HARN projection
+  scale: 20,
+  region: geo.geometry(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e13,
+  folder: "from_GEE"
+});
+
+// Export the classification
+Export.image.toDrive({
+  image: final_map,
+  description: 'Florence_flooding_random_forest_binary_permwater',
+  crs: 'EPSG:3358', // NAD 83 HARN projection
+  scale: 20,
+  region: geo.geometry(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e13,
+  folder: "from_GEE"
+});
+
+
+// Export the classification including permanent water areas from JRC
+Export.image.toDrive({
+  image: result_rf1_floodPermWater,
+  description: 'Florence_flooding_random_forest_separate_permwater',
+  crs: 'EPSG:3358', // NAD 83 HARN projection
+  scale: 20,
+  region: geo.geometry(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e13,
+  folder: "from_GEE"
+});
+
