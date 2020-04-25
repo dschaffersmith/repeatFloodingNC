@@ -1,0 +1,168 @@
+// AUTOMATICALLY GENERATED: imported vars from saved link.
+var CONVERT_TO_IMPORT = (
+[{"type":"table","name":"NcBasins","record":{"id":"users/dschaffersmith/TNC_SRP/Major_River_Basins"}},{"type":"table","name":"Protected","record":{"id":"users/dschaffersmith/TNC_SRP/ManagedAreas"}},{"type":"image","name":"cdl","record":{"id":"USDA/NASS/CDL/2017"}},{"type":"image","name":"Flo","record":{"id":"users/dschaffersmith/TNC_SRP/Florence_RF_binary_permwater_20190625"}},{"type":"image","name":"Matt","record":{"id":"users/dschaffersmith/TNC_SRP/Matthew_RF_binary_permwater_20190625"}}])
+
+// AUTOMATICALLY GENERATED: location from saved link.
+Map.setCenter(281.22, 35.88, 9)
+
+// April 8, 2020
+
+// Danica Schaffer-Smith
+// d.schaffer-smith@tnc.org
+
+// This script identifies a spatial set of intervention opportunities to address flooding and water quality 
+// problems in the Piedmont and Coastal Plain of North Carolina using flood extent information for recent 
+// storms, and landcover data. 
+
+// Flooded extents due to Hurricanes Matthew and Florence were delineated using a random forest 
+// classification relying on Sentinel-1 synthetic aperture radar and other datasets. 
+// Please see 'Flood_mapping/01_random_forest_classification_code'
+
+// This analysis only considered lands that are not currently under some form of protection 
+// (e.g., state park, easement), as determined from The Nature Conservancy's secured and managed lands 
+// geospatial database.
+
+
+// --------------------------------------------------------------------------------------------------------
+// PART I: LOAD AND PREPARE DATA
+// --------------------------------------------------------------------------------------------------------
+
+// Vector Datasets: 
+
+// NC River Basins
+// Select watersheds that drain to the Atlantic Ocean
+var basinList = ['Cape Fear', 'Chowan', 'Neuse', 'Lumber', 'Pasquotank', 'Roanoke', 'Tar Pamlico', 'White Oak', 'Yadkin Pee Dee'];
+var coastalBasins = NcBasins.filter(ee.Filter.inList('Name', basinList));
+
+var geo = coastalBasins; // set the geography for analysis
+
+// Raster Datasets:
+
+// Flooded extents from Matthew and Florence are loaded as an import
+// Combine the flood extent maps for Matthew and Florence to get areas that flooded at least once.
+var flooded = Matt.add(Flo);
+var flooded_re = flooded
+  .where(flooded.gt(0), 1);
+
+// Cropland Data Layer (USDA 2017)
+// Select cropland band
+var cdl = cdl
+  .select('cropland');
+
+
+// Reclassify CDL values 
+// Resulting categories will be: (0) Excluded, (1) Developed/Impervious, (2) Forest, (3) Open water (wotus), (4) Wetland, (5) Non-Forest/Non-wetland land restoration opportunities
+// 1-61 = Restore (Ag)
+// 63	=	Forest
+// 64 -77 = Restore
+// 81 = Clouds/NoData
+// 82 = Developed
+//*** 83 = Open water
+//*** 84-87 = Wetland
+// 88-92 = EXCLUDED (Undefined/Aquaculture)
+//*** 111 = Open water
+// 112 = EXCLUDED (Ice/Snow)
+// 121 - 124 Developed
+// 131 = Restore (Barren)
+// 141-143 = Forest
+// 152-176 = Restore
+//*** 190-195 = Wetland
+// 204-254 Restore (Ag)
+
+var cdl_re = cdl
+    .where(cdl.lt(63), 5)
+    .where(cdl.eq(63), 2)
+    .where(cdl.gte(64), 5)
+    .where(cdl.gte(81), 0)
+    .where(cdl.gte(82), 1)
+    .where(cdl.gte(83), 3)
+    .where(cdl.gte(84), 4)
+    .where(cdl.gte(88), 0)
+    .where(cdl.gte(111), 3)
+    .where(cdl.gte(112), 0)
+    .where(cdl.gte(121), 1)
+    .where(cdl.gt(131), 5)
+    .where(cdl.gte(141), 2)
+    .where(cdl.gte(152), 5)
+    .where(cdl.gte(190), 4)
+    .where(cdl.gte(204), 5);
+print('cdl remapped', cdl_re);
+
+
+// -----------------------------------------------------------------------------------
+// INITIAL DATA DISPLAY:
+// -----------------------------------------------------------------------------------
+
+// Set the center of the map for the study area
+Map.setCenter(-78.78, 35.88, 9); //These are the coordinates used to center the view window and the zoom level
+
+// Define a palette for land cover classes and map the new cover types in the study area
+var paletteCDL = ['999999', 'ff0000', '93cc93', '002eff', '00c7ff', 'fffa00'];
+Map.addLayer(cdl_re.clip(geo), {min:0, max:5, palette:paletteCDL});
+
+//Overlay the flooded regions within the HUC
+Map.addLayer(flooded_re, {min:0, max:1});
+
+//Overlay the river basin boundaries
+Map.addLayer(geo, {palette:'000000'});
+
+
+// -----------------------------------------------------------------------------------
+// IDENTIFY OPPORTUNITIES
+// -----------------------------------------------------------------------------------
+
+// Export conservation and restoration opportunities for the study area
+// Consider flooded areas that are not value = 1 to be masked/excluded
+var mask = flooded_re.eq(1);
+var cdl_masked = cdl_re.updateMask(mask).clip(geo);
+//Map.addLayer(cdl_masked, {min:0, max:5, palette: paletteCDL}, 'masked2');
+
+// Export the extent of permanent water areas from JRC
+Export.image.toDrive({
+  image: cdl_masked,
+  description: 'opportunities_coastal_basins',
+  crs: 'EPSG:3358', // NAD 83 HARN projection
+  scale: 30,
+  //region: geo.geometry(),
+  region: geo.geometry().bounds(),
+  fileFormat: 'GeoTIFF',
+  maxPixels: 1e13,
+  folder: "from_GEE"
+});
+
+// Get the area of each type by river basin
+var cdl_area = ee.Image.pixelArea().addBands(cdl_masked).reduceRegions({
+  collection: coastalBasins,
+  reducer: ee.Reducer.sum().group(1),
+  scale: 30 // cdl is ~30 m resolution,
+});
+print('grouped area raw', cdl_area);
+
+// convert output column list to columns
+var area_wide = cdl_area.map(function(feature){
+  var list = ee.List(ee.Feature(feature).get('groups'))
+  var keys = list.map(function(o) { return ee.Number(ee.Dictionary(o).get('group')).format('%d') })
+  var values = list.map(function(o) { return ee.Dictionary(o).get('sum') })
+  return ee.Feature(feature.geometry(), ee.Dictionary.fromLists(keys, values))
+  .copyProperties(feature)
+});
+print('grouped area formatted', area_wide.limit(10));  
+
+
+// Make a feature without geometry and set the properties to the dictionary of means.//var area_wide_ng = ee.Feature(null, area_wide);
+// remove geometry for export
+var area_wideColl = area_wide.map(function(feature) {
+  return ee.Feature(feature.select([".*"], null, false));
+});
+
+// Wrap the Feature in a FeatureCollection for export.
+//var area_wideColl = ee.FeatureCollection(null, [area_wide]);
+print(area_wideColl.limit(10));
+
+// Export extent of opportunities by river basin table
+Export.table.toDrive({
+  collection: area_wideColl,
+  description: 'extent_opportunities_by_river_basin',
+  fileFormat: 'CSV',
+  selectors: ["Name", "0", "1", "2", "3", "4", "5"]
+}); 
