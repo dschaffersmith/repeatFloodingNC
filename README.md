@@ -1,5 +1,3 @@
-# hurricaneFloodMapping
-
 Supporting code for:
 
 Repeated hurricanes reveal risks and opportunities for social-ecological resilience to flooding and water quality problems. Environmental Science & Technology. doi: 10.1021/acs.est.9b07815
